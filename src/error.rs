@@ -20,9 +20,10 @@ pub enum Error {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// `atomic clone` / `atomic pull` invocation failed.
-    #[error("atomic CLI failed: {0}")]
-    Atomic(String),
+    /// A VCS-layer operation failed (sync protocol, change store, or
+    /// working-copy materialise).
+    #[error("vcs: {0}")]
+    Vcs(String),
 
     /// User-provided runner handler returned an error.
     #[error("handler: {0}")]

@@ -17,6 +17,12 @@ serde_json         = "1"
 tracing            = "0.1"
 futures            = "0.3"
 url                = "2"
+bytes              = "1"
+
+# Atomic VCS — drive sync + apply directly from the library, no CLI shellout.
+atomic-core        = { path = "../atomic/atomic-core" }
+atomic-remote      = { path = "../atomic/atomic-remote" }
+atomic-repository  = { path = "../atomic/atomic-repository" }
 
 [profile.release]
 lto           = "thin"
