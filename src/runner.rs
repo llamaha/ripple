@@ -1,27 +1,36 @@
 //! Runner builder + event dispatch loop.
 //!
-//! Phase 1 scaffolds the public surface. The actual SSE consumption
-//! + handler dispatch lands in Phase 2 (see
-//! `plans/patchwave-runner.md`).
+//! The user constructs a [`Runner`] via [`Runner::from_env`], registers
+//! handlers per [`EventKind`] with [`Runner::on`], and then calls
+//! [`Runner::run`]. `run` opens an SSE connection to
+//! `/api/streams/runners`, decodes each event, and spawns the matching
+//! handler with a per-event [`RunnerContext`]. The loop reconnects with
+//! exponential backoff on transport errors or clean stream closes.
 
 use crate::checkout::RepoCheckout;
 use crate::config::Config;
 use crate::error::Result;
 use crate::event::{Event, EventKind};
-use crate::report::{Reporter, ReportStatus};
+use crate::report::{ReportStatus, Reporter};
+use crate::sse;
+
+use futures::StreamExt as _;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
-type HandlerFn =
-    Arc<dyn Fn(RunnerContext) -> HandlerFuture + Send + Sync + 'static>;
+type HandlerFn = Arc<dyn Fn(RunnerContext) -> HandlerFuture + Send + Sync + 'static>;
+
+const RECONNECT_INITIAL: Duration = Duration::from_millis(500);
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 /// Top-level runner builder. Construct via [`Runner::from_env`], chain
 /// `.on(...)` handlers, then `.run()` the event loop.
 pub struct Runner {
-    cfg: Config,
+    cfg: Arc<Config>,
     client: reqwest::Client,
     handlers: HashMap<EventKind, HandlerFn>,
     repo_filter: Option<(String, String)>,
@@ -30,7 +39,7 @@ pub struct Runner {
 impl Runner {
     /// Construct from `PATCHWAVE_URL` + `PATCHWAVE_TOKEN` env.
     pub fn from_env() -> Result<Self> {
-        let cfg = Config::from_env()?;
+        let cfg = Arc::new(Config::from_env()?);
         let client = reqwest::Client::builder()
             .user_agent(concat!("ripple/", env!("CARGO_PKG_VERSION")))
             .build()?;
@@ -50,28 +59,96 @@ impl Runner {
     }
 
     /// Register a handler for the given event kind. Last write wins
-    /// per kind — register one handler per kind per runner binary.
+    /// per kind — one handler per kind per runner binary.
     pub fn on<F, Fut>(mut self, kind: EventKind, handler: F) -> Self
     where
         F: Fn(RunnerContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        self.handlers.insert(
-            kind,
-            Arc::new(move |ctx| Box::pin(handler(ctx))),
-        );
+        self.handlers
+            .insert(kind, Arc::new(move |ctx| Box::pin(handler(ctx))));
         self
     }
 
-    /// Drive the event loop. Returns when the SSE stream ends and
-    /// reconnect retries are exhausted (Phase 2 detail).
+    /// Drive the event loop. Runs until cancelled (Ctrl-C / drop).
+    /// Reconnects with exponential backoff on transport errors.
     pub async fn run(self) -> Result<()> {
-        // Phase 2: open SSE via `crate::sse::subscribe`, parse
-        // payloads into Event, dispatch to handlers via
-        // tokio::spawn. For Phase 1 this is a NOOP that keeps the
-        // surface stable.
-        let _ = (self.cfg, self.client, self.handlers, self.repo_filter);
+        let mut backoff = RECONNECT_INITIAL;
+        loop {
+            match self.run_one_connection().await {
+                Ok(()) => {
+                    tracing::info!("ripple SSE: stream closed cleanly, reconnecting");
+                    backoff = RECONNECT_INITIAL;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ripple SSE: error, reconnecting in {:?}", backoff);
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(RECONNECT_MAX);
+        }
+    }
+
+    /// Open one SSE connection, dispatch events until it closes, then
+    /// return. The outer `run` decides whether to reconnect.
+    async fn run_one_connection(&self) -> Result<()> {
+        let mut stream = sse::subscribe(&self.cfg, &self.client).await?;
+        tracing::info!("ripple SSE: connected to {}", sse::RUNNER_STREAM_PATH);
+
+        while let Some(payload) = stream.next().await {
+            let payload = match payload {
+                Ok(p) => p,
+                Err(e) => return Err(e),
+            };
+            self.dispatch_payload(&payload);
+        }
         Ok(())
+    }
+
+    /// Decode one SSE `data:` payload and dispatch it to the matching
+    /// handler if any. Decode failures and unmatched events are logged
+    /// at debug level so they don't drown out real activity.
+    fn dispatch_payload(&self, payload: &str) {
+        let event: Event = match serde_json::from_str(payload) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!(error = %e, payload = %payload, "ripple: undecodable SSE payload");
+                return;
+            }
+        };
+
+        let kind = match event.kind() {
+            Some(k) => k,
+            None => {
+                tracing::debug!("ripple: unhandled event kind (Event::Other)");
+                return;
+            }
+        };
+
+        if let (Some((owner, repo)), Some((f_owner, f_repo))) =
+            (event.coords(), self.repo_filter.as_ref().map(|(o, r)| (o.as_str(), r.as_str())))
+        {
+            if owner != f_owner || repo != f_repo {
+                return;
+            }
+        }
+
+        let Some(handler) = self.handlers.get(&kind).cloned() else {
+            tracing::debug!(?kind, "ripple: no handler registered");
+            return;
+        };
+
+        let ctx = RunnerContext {
+            cfg: self.cfg.clone(),
+            client: self.client.clone(),
+            event,
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = handler(ctx).await {
+                tracing::error!(error = %e, "ripple: handler returned error");
+            }
+        });
     }
 }
 
@@ -87,10 +164,15 @@ pub struct RunnerContext {
 
 impl RunnerContext {
     /// Clone the repo named in the event into the configured workspace.
+    /// Falls back to view `"dev"` when the event payload doesn't carry
+    /// one, matching patchwave's default.
     pub async fn checkout(&self) -> Result<RepoCheckout> {
-        let (owner, repo) = repo_from_event(&self.event)
+        let (owner, repo) = self
+            .event
+            .coords()
             .ok_or_else(|| crate::Error::Env("event carries no repo coords".into()))?;
-        RepoCheckout::clone(&self.cfg, owner, repo, self.event.change_hash()).await
+        let view = self.event.view().unwrap_or("dev");
+        RepoCheckout::clone(&self.cfg, owner, repo, view, self.event.change_hash()).await
     }
 
     /// Build a Reporter for the change-hash this event implies.
@@ -101,16 +183,6 @@ impl RunnerContext {
             self.event.change_hash().unwrap_or_default(),
             parse_status(status),
         )
-    }
-}
-
-fn repo_from_event(ev: &Event) -> Option<(&str, &str)> {
-    match ev {
-        Event::ChangePushed(p) => Some((&p.owner, &p.repo)),
-        Event::TagCreated(p) => Some((&p.owner, &p.repo)),
-        Event::IntentApproved(p) => Some((&p.owner, &p.repo)),
-        Event::IntentCiPending(p) => Some((&p.owner, &p.repo)),
-        Event::Other => None,
     }
 }
 
