@@ -188,6 +188,29 @@ impl RepoCheckout {
             .map_err(Error::Io)?;
         Ok(status.success())
     }
+
+    /// Run a shell command inside the checkout, capturing stdout + stderr
+    /// as one interleaved string. Returns `(success, combined_output)`.
+    /// Useful for surfacing build/test output in the CI report `details`.
+    pub async fn run_capture(&self, cmd: &str) -> Result<(bool, String)> {
+        self.run_capture_in(&self.path, cmd).await
+    }
+
+    /// `run_capture` against an explicit directory.
+    pub async fn run_capture_in(&self, dir: &Path, cmd: &str) -> Result<(bool, String)> {
+        let output = Command::new("sh")
+            .arg("-c")
+            // 2>&1 merges stderr into stdout in shell-execution order so the
+            // log reads the way a human running the command interactively
+            // would expect.
+            .arg(format!("({cmd}) 2>&1"))
+            .current_dir(dir)
+            .output()
+            .await
+            .map_err(Error::Io)?;
+        let combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        Ok((output.status.success(), combined))
+    }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────
