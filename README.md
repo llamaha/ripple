@@ -11,12 +11,15 @@ patchwave event  ──→  ripple runner  ──→  POST /api/ci/{hash}/result
 
 ## Status
 
-**Phase 1 scaffold.** Public API surface and module structure are in
-place; the SSE loop is still a stub. See
-[`plans/patchwave-runner.md`](https://github.com/llamaha/patchwave/blob/main/plans/patchwave-runner.md)
-in the patchwave workspace for the live roadmap. Not yet usable as
-shipped; the reporting half (POST `/api/ci/{hash}/result`) is the
-solid piece and works today.
+**Phase 1 — flattened scaffold.** Single-crate SDK, public API
+surface in place. Reporting (`POST /api/ci/{hash}/result`) is
+production-quality and smoke-tested. SSE loop is a stub
+(Phase 3). Checkout currently shells out to `atomic clone`; that's
+getting replaced with a direct `atomic-repository` path-dep in
+Phase 2. Not yet usable end-to-end as shipped.
+
+Roadmap: [`plans/ripple.md`](https://github.com/llamaha/patchwave/blob/main/plans/ripple.md)
+in the patchwave workspace.
 
 ## Why
 
@@ -61,25 +64,29 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Wired into a binary, it's `crates/example-cargo-test/src/main.rs` in
-this repo. Configure via env:
+The reference binary lives in its own repo: [`ripple-cargo-test`]
+(coming in Phase 4). Configure via env:
 
 ```bash
 export PATCHWAVE_URL=https://patchwave.example.com
-export PATCHWAVE_TOKEN=<api-token>
+export PATCHWAVE_TOKEN=<api-token>      # NOT a password
 export PATCHWAVE_RUNNER_NAME=cargo-test-runner
-cargo run -p example-cargo-test
+cargo run --release
 ```
+
+Mint the token via `POST /api/users/{username}/tokens` against your
+patchwave server. The token's user needs push access to whichever
+repos the runner will report against.
+
+[`ripple-cargo-test`]: https://github.com/llamaha/ripple-cargo-test
 
 ## Layout
 
 ```
 ripple/
-├── Cargo.toml                       workspace
-├── crates/
-│   ├── ripple/                      the SDK
-│   └── example-cargo-test/          the reference binary
-└── plans → see patchwave workspace
+├── Cargo.toml      single-crate package
+├── src/            SDK source
+└── README.md       this file
 ```
 
 The SDK currently exposes:
@@ -87,9 +94,9 @@ The SDK currently exposes:
 | Module | Purpose |
 |--------|---------|
 | `config`   | Env-driven runtime config (`PATCHWAVE_URL`, `PATCHWAVE_TOKEN`, …) |
-| `sse`      | Long-lived `GET /api/streams/discuss` subscriber (stub — Phase 2) |
-| `event`    | Typed event enum (`ChangePushed`, `TagCreated`, `IntentApproved`, …) |
-| `checkout` | `RepoCheckout` — wraps `atomic clone` / `atomic pull` |
+| `sse`      | Long-lived `GET /api/streams/discuss` subscriber (stub, Phase 3) |
+| `event`    | Typed event enum (`ChangePushed`, `TagCreated`, `ViewMerged`, `IntentCiPending`) |
+| `checkout` | `RepoCheckout` — `atomic clone` shellout today, `atomic-repository` direct in Phase 2 |
 | `report`   | `Reporter` builder — POSTs to `/api/ci/{hash}/result` |
 | `runner`   | `Runner::from_env().on(kind, handler).run()` |
 
@@ -113,7 +120,7 @@ as you choose to make it.
 ## Building
 
 ```bash
-cargo build --workspace
+cargo build --release
 ```
 
 Rust 1.75+. No nightly. No build scripts. No proc-macro tricks

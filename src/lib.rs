@@ -4,22 +4,22 @@
 //! A runner is a regular program that:
 //!
 //! 1. Subscribes to a patchwave SSE event stream.
-//! 2. Does one job — `cargo test`, `terraform plan`, ship a deploy.
+//! 2. Does one job: `cargo test`, `terraform plan`, ship a deploy.
 //! 3. POSTs the result back to `/api/ci/{change_hash}/result`.
 //!
-//! The SDK wraps the SSE plumbing, the `atomic clone` shellout, and
-//! the result-reporting POST so the user code is just "on this event,
-//! do this work, return pass/fail".
+//! The SDK wraps the SSE plumbing, the repo checkout, and the
+//! result-reporting POST so the user code is just "on this event, do
+//! this work, return pass/fail".
 //!
 //! ```ignore
-//! use ripple::{Runner, Event};
+//! use ripple::{event::EventKind, Runner};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     Runner::from_env()?
-//!         .on(Event::TagCreated, |ctx| async move {
-//!             let work = ctx.checkout().await?;
-//!             let ok = ctx.run("cargo test --quiet", &work).await?;
+//!         .on(EventKind::TagCreated, |ctx| async move {
+//!             let checkout = ctx.checkout().await?;
+//!             let ok = checkout.run("cargo test --quiet").await?;
 //!             ctx.report(if ok { "pass" } else { "fail" }).send().await
 //!         })
 //!         .run()
@@ -27,10 +27,10 @@
 //! }
 //! ```
 //!
-//! See `plans/patchwave-runner.md` in the workspace for the live
-//! roadmap.
+//! Roadmap: [`plans/ripple.md`] in the patchwave workspace.
 //!
 //! [patchwave]: https://github.com/llamaha/patchwave
+//! [`plans/ripple.md`]: https://github.com/llamaha/patchwave/blob/main/plans/ripple.md
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
