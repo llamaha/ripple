@@ -1,0 +1,19 @@
+[package]
+name        = "example-cargo-test"
+description = "Reference ripple runner: clone, cargo test, report."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+
+[[bin]]
+name = "ripple-cargo-test"
+path = "src/main.rs"
+
+[dependencies]
+ripple             = { workspace = true }
+anyhow             = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
