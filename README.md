@@ -11,14 +11,14 @@ patchwave event  ──→  ripple runner  ──→  POST /api/ci/{hash}/result
 
 ## Status
 
-**Phase 1 — flattened scaffold.** Single-crate SDK, public API
-surface in place. Reporting (`POST /api/ci/{hash}/result`) is
-production-quality and smoke-tested. SSE loop is a stub
-(Phase 3). Checkout currently shells out to `atomic clone`; that's
-getting replaced with a direct `atomic-repository` path-dep in
-Phase 2. Not yet usable end-to-end as shipped.
+End-to-end working. Single-crate SDK. Subscribes to
+`/api/streams/runners`, clones via `atomic-repository` directly
+(no CLI shellout), reports back via `/api/ci/{hash}/result`.
+Reference runner lives in [`ripple-cargo-test`].
 
-Roadmap: [`plans/ripple.md`](https://github.com/llamaha/patchwave/blob/main/plans/ripple.md)
+Path-dep on `atomic-repository` during dev — switch to a pinned
+git rev before the first ripple tag. Roadmap and trade-offs:
+[`plans/ripple.md`](https://github.com/llamaha/patchwave/blob/main/plans/ripple.md)
 in the patchwave workspace.
 
 ## Why
@@ -64,8 +64,8 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-The reference binary lives in its own repo: [`ripple-cargo-test`]
-(coming in Phase 4). Configure via env:
+The reference binary lives in its own repo:
+[`ripple-cargo-test`]. Configure via env:
 
 ```bash
 export PATCHWAVE_URL=https://patchwave.example.com
@@ -94,11 +94,11 @@ The SDK currently exposes:
 | Module | Purpose |
 |--------|---------|
 | `config`   | Env-driven runtime config (`PATCHWAVE_URL`, `PATCHWAVE_TOKEN`, …) |
-| `sse`      | Long-lived `GET /api/streams/discuss` subscriber (stub, Phase 3) |
-| `event`    | Typed event enum (`ChangePushed`, `TagCreated`, `ViewMerged`, `IntentCiPending`) |
-| `checkout` | `RepoCheckout` — `atomic clone` shellout today, `atomic-repository` direct in Phase 2 |
+| `sse`      | Long-lived `GET /api/streams/runners` subscriber with frame parser |
+| `event`    | Typed event enum (`ChangePushed`, `TagCreated`, `ViewMerged`, `Other`) |
+| `checkout` | `RepoCheckout` — drives the sync protocol via `atomic-remote`, materialises via `atomic-repository` |
 | `report`   | `Reporter` builder — POSTs to `/api/ci/{hash}/result` |
-| `runner`   | `Runner::from_env().on(kind, handler).run()` |
+| `runner`   | `Runner::from_env().on(kind, handler).run()` with reconnect + backoff |
 
 ## Trade-offs
 
