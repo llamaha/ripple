@@ -117,6 +117,16 @@ impl<'a> Reporter<'a> {
         self
     }
 
+    /// Set `details.stage` — the operator-defined stage name this
+    /// result is for (e.g. `"tests"`, `"deploy"`). Required when the
+    /// repo's CI pipeline is split across stages: the server uses it
+    /// to advance the pipeline and to halt on a fail. Omit for legacy
+    /// single-stage CI.
+    pub fn stage(mut self, s: impl Into<String>) -> Self {
+        self.details.insert("stage".into(), json!(s.into()));
+        self
+    }
+
     /// Override the auto-detected provider chip.
     pub fn provider(mut self, s: impl Into<String>) -> Self {
         self.details.insert("provider".into(), json!(s.into()));

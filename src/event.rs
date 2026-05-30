@@ -6,7 +6,7 @@
 //!
 //! ```json
 //! {
-//!   "kind":    "change.pushed | tag.created | view.merged",
+//!   "kind":    "change.pushed | tag.created | view.merged | ci_stage",
 //!   "owner":   "...",
 //!   "repo":    "...",
 //!   "payload": { /* kind-specific */ }
@@ -33,6 +33,12 @@ pub enum Event {
     /// A view was merged into another via `POST .../views/{from}/apply/{to}`.
     #[serde(rename = "view.merged")]
     ViewMerged(ViewMerged),
+    /// A single CI stage was dispatched for a tag. Emitted by the
+    /// server when a configured stage's `webhook_url` uses the
+    /// `sse://` scheme — the runner picks the job up off the stream
+    /// instead of taking an inbound HTTP POST.
+    #[serde(rename = "ci_stage")]
+    CiStage(CiStage),
     /// Anything the SDK does not recognise — newer server kinds, etc.
     /// Payload is dropped; if you need it, upgrade the SDK.
     #[serde(other)]
@@ -107,6 +113,35 @@ pub struct ViewMergedPayload {
     pub head: Option<String>,
 }
 
+/// `ci_stage` envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiStage {
+    /// Repo owner slug.
+    pub owner: String,
+    /// Repo name slug.
+    pub repo: String,
+    /// Payload-specific fields.
+    pub payload: CiStagePayload,
+}
+
+/// `ci_stage` payload — one stage in a tag's pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiStagePayload {
+    /// Tag whose pipeline this stage belongs to.
+    pub tag: String,
+    /// State hash the tag points at — the change to check out.
+    pub state: String,
+    /// View the tag was created on. Used by checkout to pick the
+    /// right changelist; the runner clones at this view's HEAD.
+    pub view: String,
+    /// Stage name (operator-defined; e.g. `tests`, `docs`, `deploy`).
+    pub stage: String,
+    /// 1-based stage index in the pipeline.
+    pub stage_order: i64,
+    /// Total number of stages in the pipeline. Use for "stage 2/3" UI.
+    pub total_stages: usize,
+}
+
 /// Discriminator-only enum used by `Runner::on` to register handlers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
@@ -116,6 +151,8 @@ pub enum EventKind {
     TagCreated,
     /// Matches [`Event::ViewMerged`].
     ViewMerged,
+    /// Matches [`Event::CiStage`].
+    CiStage,
 }
 
 impl Event {
@@ -125,6 +162,7 @@ impl Event {
             Event::ChangePushed(_) => EventKind::ChangePushed,
             Event::TagCreated(_) => EventKind::TagCreated,
             Event::ViewMerged(_) => EventKind::ViewMerged,
+            Event::CiStage(_) => EventKind::CiStage,
             Event::Other => return None,
         })
     }
@@ -135,30 +173,47 @@ impl Event {
             Event::ChangePushed(e) => Some((&e.owner, &e.repo)),
             Event::TagCreated(e) => Some((&e.owner, &e.repo)),
             Event::ViewMerged(e) => Some((&e.owner, &e.repo)),
+            Event::CiStage(e) => Some((&e.owner, &e.repo)),
             Event::Other => None,
         }
     }
 
     /// The change/state hash this event implies a CI run should target.
     /// `change.pushed` → the change hash; `tag.created` → the tagged
-    /// state hash; `view.merged` → the resulting head change.
+    /// state hash; `view.merged` → the resulting head change;
+    /// `ci_stage` → the tag's state hash.
     pub fn change_hash(&self) -> Option<&str> {
         match self {
             Event::ChangePushed(e) => Some(&e.payload.change_hash),
             Event::TagCreated(e) => Some(&e.payload.state_hash),
             Event::ViewMerged(e) => e.payload.head.as_deref(),
+            Event::CiStage(e) => Some(&e.payload.state),
             Event::Other => None,
         }
     }
 
     /// View this event happened on. `view.merged` returns the
-    /// destination view (`to_view`).
+    /// destination view (`to_view`); `ci_stage` returns the view the
+    /// tag was created on so [`crate::RunnerContext::checkout`] picks
+    /// up the right changelist.
     pub fn view(&self) -> Option<&str> {
         match self {
             Event::ChangePushed(e) => Some(&e.payload.view),
             Event::TagCreated(e) => Some(&e.payload.view),
             Event::ViewMerged(e) => Some(&e.payload.to_view),
+            Event::CiStage(e) => Some(&e.payload.view),
             Event::Other => None,
+        }
+    }
+
+    /// Stage name for [`Event::CiStage`] (the operator-defined stage
+    /// label, e.g. `"tests"`). `None` for every other variant — saves
+    /// handlers from having to pattern-match when they only care about
+    /// the stage identifier.
+    pub fn stage(&self) -> Option<&str> {
+        match self {
+            Event::CiStage(e) => Some(&e.payload.stage),
+            _ => None,
         }
     }
 }
@@ -213,6 +268,29 @@ mod tests {
         let ev: Event = serde_json::from_str(raw).unwrap();
         assert_eq!(ev.kind(), Some(EventKind::ViewMerged));
         assert_eq!(ev.view(), Some("dev"));
+    }
+
+    #[test]
+    fn parses_ci_stage_envelope() {
+        let raw = r#"{
+            "kind": "ci_stage",
+            "owner": "alice",
+            "repo": "demo",
+            "payload": {
+                "tag": "v1",
+                "state": "ST",
+                "view": "dev",
+                "stage": "tests",
+                "stage_order": 2,
+                "total_stages": 3
+            }
+        }"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        assert_eq!(ev.kind(), Some(EventKind::CiStage));
+        assert_eq!(ev.coords(), Some(("alice", "demo")));
+        assert_eq!(ev.change_hash(), Some("ST"));
+        assert_eq!(ev.view(), Some("dev"));
+        assert_eq!(ev.stage(), Some("tests"));
     }
 
     #[test]

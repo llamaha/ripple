@@ -179,7 +179,10 @@ impl RunnerContext {
     ///
     /// Auto-attaches `(owner, repo)` from the event so
     /// [`Reporter::attach_log`] can upload blob-tier logs without the
-    /// caller having to repeat the coords.
+    /// caller having to repeat the coords. For [`Event::CiStage`] the
+    /// `details.stage` field is also pre-filled so the server can
+    /// advance the pipeline without the handler having to echo the
+    /// stage name back.
     pub fn report(&self, status: &str) -> Reporter<'_> {
         let mut r = Reporter::new(
             &self.cfg,
@@ -189,6 +192,9 @@ impl RunnerContext {
         );
         if let Some((owner, repo)) = self.event.coords() {
             r = r.with_repo(owner, repo);
+        }
+        if let Some(stage) = self.event.stage() {
+            r = r.stage(stage);
         }
         r
     }
