@@ -78,6 +78,25 @@ Mint the token via `POST /api/users/{username}/tokens` against your
 patchwave server. The token's user needs push access to whichever
 repos the runner will report against.
 
+### Runner identity (optional)
+
+Each open runner connection shows up as a row in the patchwave
+admin Runners dashboard and under the owner's Profile → Bots
+presence dot. To make a runner identify itself with richer
+metadata, set any of:
+
+| Env var | Purpose |
+|---------|---------|
+| `PATCHWAVE_RUNNER_INSTANCE` | Stable per-process id. Two runners with the same `name` on the same host should set distinct instances. |
+| `PATCHWAVE_RUNNER_VERSION` | Override the SDK's compile-time version. |
+| `PATCHWAVE_RUNNER_ROLE` | Free-form role label (`cargo-test`, `lint`, `deploy`, …). |
+| `PATCHWAVE_RUNNER_HOSTNAME` | Runner-supplied hostname. The server also captures the source IP independently. |
+| `PATCHWAVE_RUNNER_REPOS` | Comma-separated `owner/repo` list to subscribe to. Absent = every repo the token can push to. Each entry must be in the token's access set or the server rejects the connection with 400. |
+
+These are all optional and additive — the server fills in
+defaults (e.g. `name` falls back to the token sub) when an env
+var is absent.
+
 [`ripple-cargo-test`]: https://github.com/llamaha/ripple-cargo-test
 
 ## Layout
