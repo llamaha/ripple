@@ -7,8 +7,17 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::io::Write;
+
+/// Logs strictly smaller than this go inline in `details.output`.
+/// Anything at or above this threshold uploads as a gzipped blob and
+/// the report carries `details.log_blob = "<blake3-hex>"` instead.
+/// 4 KiB matches the LFS threshold pattern; revisit after live data.
+pub const INLINE_LOG_MAX_BYTES: usize = 4 * 1024;
 
 /// Builder for a CI result POST. Construct via [`Reporter::new`] or
 /// (more typically) via [`crate::RunnerContext::report`].
@@ -19,6 +28,8 @@ pub struct Reporter<'a> {
     change_hash: String,
     status: ReportStatus,
     details: Map<String, Value>,
+    owner: Option<String>,
+    repo: Option<String>,
 }
 
 /// Permitted CI report statuses. Patchwave widens this set over
@@ -66,7 +77,20 @@ impl<'a> Reporter<'a> {
             change_hash: change_hash.into(),
             status,
             details,
+            owner: None,
+            repo: None,
         }
+    }
+
+    /// Tag the reporter with the repo it should upload log blobs into.
+    /// [`RunnerContext::report`] sets this automatically from the
+    /// in-flight event; callers that build a [`Reporter`] directly must
+    /// supply it themselves or [`attach_log`](Self::attach_log) will
+    /// fall back to truncated-inline for oversized logs.
+    pub fn with_repo(mut self, owner: impl Into<String>, repo: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
+        self.repo = Some(repo.into());
+        self
     }
 
     /// Set `details.summary`.
@@ -104,6 +128,86 @@ impl<'a> Reporter<'a> {
     pub fn detail(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.details.insert(key.into(), value.into());
         self
+    }
+
+    /// Attach captured job output to the report.
+    ///
+    /// Logs smaller than [`INLINE_LOG_MAX_BYTES`] go straight into
+    /// `details.output` (one round-trip, no blob bookkeeping). Larger
+    /// logs are gzipped, content-addressed by Blake3, and uploaded via
+    /// `POST /api/blobs/{owner}/{repo}/{hash}`; the report then carries
+    /// `details.log_blob = "<hash>"` and
+    /// `details.log_compressed = "gzip"`. The UI knows to fetch and
+    /// inflate from there.
+    ///
+    /// If the reporter has no `(owner, repo)` context (i.e. it was
+    /// constructed manually without [`Reporter::with_repo`]), oversized
+    /// logs are truncated to the tail and inlined instead — the report
+    /// still goes through, just with less context than ideal.
+    pub async fn attach_log(mut self, output: &str) -> Result<Self> {
+        if output.len() < INLINE_LOG_MAX_BYTES {
+            self.details.insert("output".into(), json!(output));
+            return Ok(self);
+        }
+
+        // Need (owner, repo) to know where to PUT the blob. Without
+        // them, degrade to a tail-truncated inline log so the report
+        // still goes out — the operator still gets *something*.
+        let (owner, repo) = match (self.owner.clone(), self.repo.clone()) {
+            (Some(o), Some(r)) => (o, r),
+            _ => {
+                let mut start = output.len().saturating_sub(INLINE_LOG_MAX_BYTES);
+                while start < output.len() && !output.is_char_boundary(start) {
+                    start += 1;
+                }
+                let tail = &output[start..];
+                self.details.insert(
+                    "output".into(),
+                    json!(format!(
+                        "…[log too large to upload; reporter has no (owner, repo) — keeping last {} bytes]…\n{}",
+                        tail.len(),
+                        tail,
+                    )),
+                );
+                return Ok(self);
+            }
+        };
+
+        let gz_bytes = {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(output.as_bytes())?;
+            encoder.finish()?
+        };
+
+        let hash_hex = blake3::hash(&gz_bytes).to_hex().to_string();
+
+        let url = format!(
+            "{}/api/blobs/{}/{}/{}",
+            self.cfg.server, owner, repo, hash_hex
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.cfg.token)
+            .body(gz_bytes)
+            .send()
+            .await
+            .map_err(Error::Http)?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let truncated = body.chars().take(400).collect::<String>();
+            return Err(Error::Report {
+                status: status.as_u16(),
+                body: truncated,
+            });
+        }
+
+        self.details.insert("log_blob".into(), json!(hash_hex));
+        self.details
+            .insert("log_compressed".into(), json!("gzip"));
+        Ok(self)
     }
 
     /// POST the report. Returns `Ok(())` on `204 No Content`.

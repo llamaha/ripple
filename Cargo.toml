@@ -18,6 +18,8 @@ tracing            = "0.1"
 futures            = "0.3"
 url                = "2"
 bytes              = "1"
+flate2             = "1"
+blake3             = "1"
 
 # Atomic VCS — drive sync + apply directly from the library, no CLI shellout.
 atomic-core        = { path = "../atomic/atomic-core" }

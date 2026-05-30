@@ -176,13 +176,21 @@ impl RunnerContext {
     }
 
     /// Build a Reporter for the change-hash this event implies.
+    ///
+    /// Auto-attaches `(owner, repo)` from the event so
+    /// [`Reporter::attach_log`] can upload blob-tier logs without the
+    /// caller having to repeat the coords.
     pub fn report(&self, status: &str) -> Reporter<'_> {
-        Reporter::new(
+        let mut r = Reporter::new(
             &self.cfg,
             &self.client,
             self.event.change_hash().unwrap_or_default(),
             parse_status(status),
-        )
+        );
+        if let Some((owner, repo)) = self.event.coords() {
+            r = r.with_repo(owner, repo);
+        }
+        r
     }
 }
 
