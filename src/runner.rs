@@ -39,12 +39,17 @@ pub struct Runner {
 impl Runner {
     /// Construct from `PATCHWAVE_URL` + `PATCHWAVE_TOKEN` env.
     pub fn from_env() -> Result<Self> {
-        let cfg = Arc::new(Config::from_env()?);
+        Self::from_config(Config::from_env()?)
+    }
+
+    /// Construct from a fully-populated [`Config`]. Use this when
+    /// loading runner settings from a file or any other source.
+    pub fn from_config(cfg: Config) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("ripple/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
-            cfg,
+            cfg: Arc::new(cfg),
             client,
             handlers: HashMap::new(),
             repo_filter: None,
